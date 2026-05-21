@@ -8,15 +8,35 @@ services:
             nofile:
                 soft: 65536
                 hard: 65536
-        volumes:
-            - type: bind
-              source: ./influxdb.conf
-              target: /etc/influxdb/influxdb.conf
-              read_only: true
-            - type: bind
-              source: ./influxdb
-              target: /var/lib/influxdb
-        ports:
+environment:
+      # CRITICAL: Triggers the 1.x data migration
+      - DOCKER_INFLUXDB_INIT_MODE=upgrade
+      # 2.0 Admin User Credentials
+      - DOCKER_INFLUXDB_INIT_USERNAME=new_admin
+      - DOCKER_INFLUXDB_INIT_PASSWORD=your_new_secure_password
+      # Organization and default Bucket names for 2.0 structure
+      - DOCKER_INFLUXDB_INIT_ORG=my_organization
+      - DOCKER_INFLUXDB_INIT_BUCKET=powerwall_data_v2
+
+volumes:
+      # Keep the 1.8 config mount for reference (optional, but safe)
+      - type: bind
+        source: ./influxdb.conf
+        target: /etc/influxdb/influxdb.conf
+        read_only: true
+
+      # KEEP: Mount the 1.8 data path (./influxdb) for the utility to READ from.
+      - type: bind
+        source: ./influxdb
+        target: /var/lib/influxdb
+        read_only: true # Set to read-only for safety during migration
+
+      # NEW: Mount a new path for the 2.0 data to be WRITTEN to.
+      # Create this directory (e.g., './influxdb2') on your host first!
+      - type: bind
+        source: ./influxdb2
+        target: /var/lib/influxdb2
+      ports:
             - "${INFLUXDB_PORTS:-8086:8086}"
         env_file:
             - influxdb.env
