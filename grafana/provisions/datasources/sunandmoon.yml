@@ -1,0 +1,9 @@
+apiVersion: 1
+
+datasources:
+  - name: Sun and Moon (auto provisioned)
+    type: fetzerch-sunandmoon-datasource
+    jsonData: 
+      latitude: 51.1917 
+      longitude: 0.06729
+    editable: true

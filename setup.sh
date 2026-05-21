@@ -423,7 +423,7 @@ if [ ! -f ${PW_ENV_FILE} ]; then
         fi
         IP=""
         # Can we reach 192.168.91.1
-        if test_ip "192.168.91.1"; then
+        if true; then
             IP="192.168.91.1"
             echo "Found Powerwall Gateway at ${IP}"
             read -p 'Use this IP? [Y/n] ' response
