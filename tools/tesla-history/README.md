@@ -14,9 +14,9 @@ This could be useful for instance to import data from before you started using P
 ## Usage
 
 To use the script:
-- Install the required python modules: 
+- Install the required python modules (requires **pypowerwall v0.15.12 or later**):
   ```bash
-  pip install python-dateutil teslapy influxdb
+  pip install "pypowerwall>=0.15.12" python-dateutil influxdb httpx h2
   ```
 - Follow the steps below
 
@@ -59,22 +59,30 @@ Generally, only your Tesla account `email address` and your `timezone` will be r
 
 After the config is saved, you will be prompted to login to your Tesla account.
 
-This is done by opening the displayed URL in your browser and then logging in:
+This requires a web-based login which will open automatically if a browser is available. NOTE: If a browser is being detected but not working, you can prevent the browser from opening and force the remote session process (below) by re-running login with the `--headless` option, i.e. `python tesla-history.py --login --headless`
+
+If you are running setup over SSH, the remote session will be detected and you will be prompted for both your refresh token and access token. On a local machine (laptop/workstation) that has a browser available, install pypowerwall with `pip install -U pypowerwall` and then run `python -m pypowerwall authtoken` to obtain the tokens, which can then be pasted at the prompts.
 
 ```
 ----------------------------------------
 Tesla account: your@email.address
 ----------------------------------------
-Open the below address in your browser to login.
 
-<copy URL to browser> e.g.: https://auth.tesla.com/oauth2/v3/authorize?response_type=code...etc.
+============================================================
+Tesla Authentication — Remote Session Detected
+============================================================
 
-After login, paste the URL of the 'Page Not Found' webpage below.
+You're on a remote session. On your local Mac/PC with
+pypowerwall installed, run:
 
-Enter URL after login: <paste URL from browser> e.g.: https://auth.tesla.com/void/callback?code=...etc.
+    python -m pypowerwall authtoken
+
+That will open a login window. After authentication,
+copy both the refresh token and access token, then paste them here.
+
+Refresh token:
+Access token (valid ~8h):
 ```
-
-After you have logged in successfully, the browser will show a 'Page Not Found' webpage. Copy the URL of this page and paste it at the prompt.
 
 Once logged in successfully, you will be shown details of the energy site(s) associated with your account:
 
@@ -259,28 +267,34 @@ For more usage options, run without arguments or with the `--help` option:
 python3 tesla-history.py --help
 ```
 ```
-usage: tesla-history.py [-h] [-l] [-t] [-d] [--config CONFIG] [--site SITE] [--ignoretz] [--force] [--remove] [--start START] [--end END] [--today] [--yesterday]
+usage: tesla-history.py [-h] [-l] [-t] [-d] [--dry-run] [--region {us,cn}] [--headless] [--config CONFIG] [--site SITE] [--reserve RESERVE] [--force] [--remove] [--daemon] [--start START] [--end END] [--today] [--yesterday]
 
-Import Powerwall history data from Tesla Owner API (Tesla cloud) into InfluxDB
+Import Powerwall or Solar history data from Tesla Owner API (Tesla cloud) into InfluxDB
 
 options:
-  -h, --help       show this help message and exit
-  -l, --login      login to Tesla account only and save auth token (do not get history)
-  -t, --test       enable test mode (do not import into InfluxDB)
-  -d, --debug      enable debug output (print raw responses from Tesla cloud)
+  -h, --help         show this help message and exit
+  -l, --login        login to Tesla account only and save auth token (do not get history)
+  -t, --test         enable test mode (do not import into InfluxDB)
+  -d, --debug        enable debug output (print raw responses from Tesla cloud)
+  --dry-run          identify data gaps and show number of API calls required without making any API calls
+
+login options:
+  --region {us,cn}   specify Tesla account region (default: us)
+  --headless         headless mode (show auth token prompt instead of opening browser)
 
 advanced options:
-  --config CONFIG  specify an alternate config file (default: tesla-history.conf)
-  --site SITE      site id (required for Tesla accounts with multiple energy sites)
-  --ignoretz       ignore timezone difference between Tesla cloud and InfluxDB
-  --force          force import for date/time range (skip search for data gaps)
-  --remove         remove imported data from InfluxDB for date/time range
+  --config CONFIG    specify an alternate config file (default: tesla-history.conf)
+  --site SITE        site id (required for Tesla accounts with multiple energy sites)
+  --reserve RESERVE  also search for backup reserve percent data gaps and set to value
+  --force            force import for date/time range (skip search for data gaps)
+  --remove           remove imported data from InfluxDB for date/time range
+  --daemon           run as a daemon service (continually poll for history data)
 
 date/time range options:
-  --start START    start date and time ("YYYY-MM-DD hh:mm:ss")
-  --end END        end date and time ("YYYY-MM-DD hh:mm:ss")
-  --today          set start/end range to "today"
-  --yesterday      set start/end range to "yesterday"
+  --start START      start date and time ("YYYY-MM-DD hh:mm:ss")
+  --end END          end date and time ("YYYY-MM-DD hh:mm:ss")
+  --today            set start/end range to "today"
+  --yesterday        set start/end range to "yesterday"
 ```
 
 Please refer to issue [#12](https://github.com/jasonacox/Powerwall-Dashboard/issues/12) for further discussion on the other advanced options, or you have questions or find a problem with this script.

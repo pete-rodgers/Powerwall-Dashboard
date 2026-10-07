@@ -133,7 +133,7 @@ while getopts ":hf" opt; do
             echo ""
             echo "Running FleetAPI Cloud Mode Setup..."
             echo ""
-            docker exec -it pypowerwall python3 -m pypowerwall fleetapi
+            docker exec -it pypowerwall python3 -m pypowerwall setup -fleetapi
             echo ""
             echo "Restarting..."
             docker restart pypowerwall
@@ -168,8 +168,10 @@ echo " 1 - Local Access     (Powerwall 1, 2, or + using the Tesla Gateway on LAN
 echo " 2 - Tesla Cloud      (Solar-only systems or Powerwalls without LAN access)"
 echo " 3 - FleetAPI Cloud   (Powerwall systems using Official Telsa API)"
 echo " 4 - Extended Metrics (Powerwall 2, +, or 3 using TEDAPI and local WiFi access)"
+echo " 5 - Wired LAN (v1r)  (Powerwall 3 over ethernet with RSA key authentication)"
 echo ""
 pw3=0
+v1r=0
 while :; do
     read -r -p "Select mode: ${choice}" response
     if [ "${response}" == "1" ]; then
@@ -181,6 +183,10 @@ while :; do
     elif [ "${response}" == "4" ]; then
         selected="Local Access"
         pw3=1
+    elif [ "${response}" == "5" ]; then
+        selected="Wired LAN (v1r)"
+        pw3=1
+        v1r=1
     elif [ -z "${response}" ] && [ ! -z "${choice}" ]; then
         selected="${config}"
     else
@@ -357,17 +363,13 @@ while true; do
         fi
     fi
 
-    # 4) POSIX / RFC style TZ strings (e.g. GMT, UTC, GMT+5, EST5EDT, etc.)
-    # Only accept if it contains at least one alphabetic character to avoid numeric garbage like '1'.
-    if [[ "$TZ" =~ [A-Za-z] ]]; then
-        if TZ="$TZ" date +%Z >/dev/null 2>&1; then
-            echo "Note: '$TZ' accepted as POSIX TZ string (not an Olson zone identifier)."
-            break
-        fi
-    fi
-
+    # No POSIX TZ string fallback: the value is used in InfluxDB tz('...') clauses, which
+    # only resolve IANA names (Go time.LoadLocation). glibc's `date` accepts almost any
+    # alphabetic string (e.g. 'American/Denver'), so it is not a usable validity check.
     echo ""
     echo "WARNING: '$TZ' is not a recognized timezone."
+    echo "         Use an IANA name such as America/Denver (enter '?' to browse)."
+    echo "         InfluxDB will fail to set up with an unrecognized timezone."
     echo -n "Do you wish to use this timezone anyway? [y/N] "
     read -r response
     if [[ "$response" =~ ^([yY][eE][sS]|[yY])$ ]]; then
@@ -405,6 +407,106 @@ function test_ip() {
     fi
 }
 
+# Assert pypowerwall.env has correct settings for selected mode
+if [ $v1r -eq 1 ]; then
+    # Create pypowerwall.env if it was removed earlier (e.g. mode change deleted it)
+    if [ ! -f ${PW_ENV_FILE} ]; then
+        touch ${PW_ENV_FILE}
+    fi
+    # v1r mode requires PW_HOST, PW_GW_PWD, and PW_RSA_KEY_PATH with non-empty values
+    if ! grep -qE "^PW_HOST=.+" "${PW_ENV_FILE}" || \
+       ! grep -qE "^PW_GW_PWD=.+" "${PW_ENV_FILE}" || \
+       ! grep -qE "^PW_RSA_KEY_PATH=.+" "${PW_ENV_FILE}"; then
+        echo ""
+        echo "Your pypowerwall.env is missing v1r mode settings."
+        echo "The following values are required for Wired LAN (v1r) mode:"
+        echo ""
+        # Upsert PW_HOST
+        if ! grep -qE "^PW_HOST=.+" "${PW_ENV_FILE}"; then
+            while [ -z "${IP}" ]; do
+                read -p 'Powerwall Wired LAN IP Address (e.g. 10.42.1.1): ' IP
+            done
+            if grep -q "^PW_HOST=" "${PW_ENV_FILE}"; then
+                sed -i.bak "s|^PW_HOST=.*|PW_HOST=${IP}|g" "${PW_ENV_FILE}"
+            else
+                echo "PW_HOST=${IP}" >> ${PW_ENV_FILE}
+            fi
+        fi
+        # Upsert PW_GW_PWD
+        if ! grep -qE "^PW_GW_PWD=.+" "${PW_ENV_FILE}"; then
+            echo ""
+            echo "The full 10-character password from your Powerwall 3 QR sticker is required."
+            echo "This is NOT the shorter 5-character local API password."
+            echo "It is the same password used for TEDAPI mode — the one on the PW3 unit itself."
+            echo ""
+            while [ -z "${PW_GW_PWD}" ]; do
+                read -p 'Powerwall 3 Password (10 characters): ' PW_GW_PWD
+            done
+            if grep -q "^PW_GW_PWD=" "${PW_ENV_FILE}"; then
+                sed -i.bak "s|^PW_GW_PWD=.*|PW_GW_PWD=${PW_GW_PWD}|g" "${PW_ENV_FILE}"
+            else
+                echo "PW_GW_PWD=${PW_GW_PWD}" >> ${PW_ENV_FILE}
+            fi
+        fi
+        # Upsert PW_RSA_KEY_PATH
+        if grep -q "^PW_RSA_KEY_PATH=" "${PW_ENV_FILE}"; then
+            sed -i.bak 's|^PW_RSA_KEY_PATH=.*|PW_RSA_KEY_PATH=.auth/tedapi_rsa_private.pem|g' "${PW_ENV_FILE}"
+        else
+            echo "PW_RSA_KEY_PATH=.auth/tedapi_rsa_private.pem" >> ${PW_ENV_FILE}
+        fi
+        # Clear PW_PASSWORD for v1r mode (not needed, avoids confusion)
+        if grep -qE "^PW_PASSWORD=.+" "${PW_ENV_FILE}"; then
+            sed -i.bak 's|^PW_PASSWORD=.*|PW_PASSWORD=|g' "${PW_ENV_FILE}"
+        fi
+        # WiFi fallback host for v1r mode
+        PW_WIFI_HOST=""
+        echo ""
+        echo "Optional: WiFi fallback host for hybrid mode and Powerwall 3 follower data."
+        echo "If your host can reach the Powerwall WiFi access point (default: 192.168.91.1),"
+        echo "entering it here enables follower queries and improves data completeness."
+        echo ""
+        if test_ip "192.168.91.1"; then
+            echo "Found Powerwall WiFi access point at 192.168.91.1"
+            read -p 'Use 192.168.91.1 as WiFi fallback host? [Y/n] ' response
+            if [[ ! "$response" =~ ^([nN][oO]|[nN])$ ]]; then
+                PW_WIFI_HOST="192.168.91.1"
+            fi
+        fi
+        if [ -z "${PW_WIFI_HOST}" ]; then
+            read -p 'Enter WiFi Host (leave blank to skip): ' PW_WIFI_HOST
+        fi
+        if [ ! -z "${PW_WIFI_HOST}" ]; then
+            echo "PW_WIFI_HOST=${PW_WIFI_HOST}" >> ${PW_ENV_FILE}
+        fi
+        # Append standard env vars if missing (PW_TIMEZONE, TZ, PW_DEBUG, PW_STYLE, PW_EMAIL, PW_PASSWORD)
+        # These are normally written by the "Create Powerwall Settings" block below, but when the v1r
+        # assertion block creates the file, that block sees the file exists and skips entirely.
+        if ! grep -qE "^PW_TIMEZONE=.+" "${PW_ENV_FILE}"; then
+            echo "PW_TIMEZONE=${TZ}" >> ${PW_ENV_FILE}
+        fi
+        if ! grep -qE "^TZ=.+" "${PW_ENV_FILE}"; then
+            echo "TZ=${TZ}" >> ${PW_ENV_FILE}
+        fi
+        if ! grep -qE "^PW_DEBUG=" "${PW_ENV_FILE}"; then
+            echo "PW_DEBUG=no" >> ${PW_ENV_FILE}
+        fi
+        if ! grep -qE "^PW_STYLE=.+" "${PW_ENV_FILE}"; then
+            echo "PW_STYLE=${PW_STYLE}" >> ${PW_ENV_FILE}
+        fi
+        if ! grep -qE "^PW_EMAIL=" "${PW_ENV_FILE}"; then
+            echo "PW_EMAIL=" >> ${PW_ENV_FILE}
+        fi
+        if ! grep -qE "^PW_PASSWORD=" "${PW_ENV_FILE}"; then
+            echo "PW_PASSWORD=" >> ${PW_ENV_FILE}
+        fi
+        echo ""
+        echo "Updated ${PW_ENV_FILE} with v1r mode settings."
+    else
+        # Even if settings exist, ensure RSA key path is correct
+        sed -i.bak 's|^PW_RSA_KEY_PATH=.*|PW_RSA_KEY_PATH=.auth/tedapi_rsa_private.pem|g' "${PW_ENV_FILE}"
+    fi
+fi
+
 # Create Powerwall Settings
 if [ ! -f ${PW_ENV_FILE} ]; then
     if [ "${config}" == "Local Access" ]; then
@@ -422,6 +524,13 @@ if [ ! -f ${PW_ENV_FILE} ]; then
             done
         fi
         IP=""
+        PW_GW_PWD=""
+        PW_RSA_KEY_PATH=""
+        PW_WIFI_HOST=""
+        # Note: v1r mode setup is handled by the assertion block above (line ~414).
+        # The assertion block runs when $v1r=1 and creates pypowerwall.env with all
+        # required v1r settings, so this "Create Powerwall Settings" block (which
+        # only runs when the file doesn't exist) is never reached for v1r mode.
         # Can we reach 192.168.91.1
         if true; then
             IP="192.168.91.1"
@@ -499,6 +608,12 @@ if [ ! -f ${PW_ENV_FILE} ]; then
     if [ ! -z "${PW_GW_PWD}" ]; then
         echo "PW_GW_PWD=${PW_GW_PWD}" >> ${PW_ENV_FILE}
     fi
+    if [ ! -z "${PW_RSA_KEY_PATH}" ]; then
+        echo "PW_RSA_KEY_PATH=${PW_RSA_KEY_PATH}" >> ${PW_ENV_FILE}
+    fi
+    if [ ! -z "${PW_WIFI_HOST}" ]; then
+        echo "PW_WIFI_HOST=${PW_WIFI_HOST}" >> ${PW_ENV_FILE}
+    fi
 fi
 
 # Create default telegraf local file if needed.
@@ -515,6 +630,28 @@ fi
 if [ ! -f ${GF_ENV_FILE} ]; then
     cp "${GF_ENV_FILE}.sample" "${GF_ENV_FILE}"
 fi
+
+# Create pypowerwall time series data directory if missing (required in 5.2.3)
+# and chown it to PWD_USER (the uid:gid the container actually runs as, per
+# powerwall.yml) rather than the invoking user, since they may differ - the
+# bind mount would otherwise be created by Docker (as root) on first start.
+mkdir -p .pypowerwall_data
+# Take the last PWD_USER assignment, strip quotes/inline comments/whitespace,
+# and validate it looks like uid:gid before using it (else fall back to default).
+DATA_DIR_OWNER=$(grep -E "^PWD_USER=" "${COMPOSE_ENV_FILE}" 2>/dev/null | tail -1 | cut -d= -f2 | cut -d'#' -f1 | tr -d '"[:space:]')
+case "${DATA_DIR_OWNER}" in
+    [0-9]*:[0-9]*) ;;
+    *) DATA_DIR_OWNER="1000:1000" ;;
+esac
+# Non-recursive: the container only needs the top-level directory writable, and
+# a recursive chown over a large time series data dir on every run would be slow.
+chown "${DATA_DIR_OWNER}" .pypowerwall_data || true
+
+# Ask about anonymous access
+echo ""
+./anonymous-access.sh
+echo "-----------------------------------------"
+echo ""
 
 echo ""
 if [ -z "${TZ}" ]; then
@@ -541,27 +678,18 @@ if [ "${LAT}" == "zzLAT" ] || [ "${LONG}" == "zzLONG" ] || [ "${LAT}" == "0.0" ]
     LAT="0.0"
     LONG="0.0"
     # Use IP address to determine location
-    PYTHON=$(command -v python3 || command -v python)
-    if [ -n "${PYTHON}" ]; then
-        IP_RESPONSE=$(curl -s -L https://freeipapi.com/api/json)
-        # Try to parse JSON but catch any errors
-        LAT=$(echo "$IP_RESPONSE" | "${PYTHON}" -c "
+    if PYTHON=$(command -v python3 || command -v python); then
+        if IP_RESPONSE=$(curl -s -L --fail https://freeipapi.com/api/json); then
+            # Try to parse JSON but catch any errors
+            read LAT LONG <<< $(printf '%s' "$IP_RESPONSE" | "${PYTHON}" -c '
 import sys, json
 try:
     data = json.load(sys.stdin)
-    print(data.get('latitude', '0.0'))
+    print(data["latitude"], data["longitude"])
 except Exception:
-    print('0.0')
-" 2>/dev/null) || LAT="0.0"
-        
-        LONG=$(echo "$IP_RESPONSE" | "${PYTHON}" -c "
-import sys, json
-try:
-    data = json.load(sys.stdin)
-    print(data.get('longitude', '0.0'))
-except Exception:
-    print('0.0')
-" 2>/dev/null) || LONG="0.0"
+    print("0.0", "0.0")
+')
+        fi
     fi
 else
     echo "Found existing location coordinates for sun cycle."
@@ -627,7 +755,48 @@ fi
 
 # Run Tesla Cloud mode setup
 if [ "${config}" == "Tesla Cloud" ]; then
+    echo ""
+    echo "NOTE: Tesla Cloud setup requires a browser-based login to obtain auth tokens."
+    echo "If you are running this via SSH or on a headless server, you will need to run"
+    echo "the following command on a local machine (e.g. your laptop or workstation) that"
+    echo "has a desktop/browser available, then copy both the refresh token and access"
+    echo "token back here:"
+    echo ""
+    echo "   pip install pypowerwall -U"
+    echo "   python3 -m pypowerwall authtoken"
+    echo ""
+    echo "Once you have the token, paste it when prompted by the setup below."
+    echo "-----------------------------------------"
     docker exec -it pypowerwall python3 -m pypowerwall setup -email=$(grep -E "^PW_EMAIL=.+" "${PW_ENV_FILE}" | cut -d= -f2)
+    echo "Restarting..."
+    docker restart pypowerwall
+    echo "-----------------------------------------"
+fi
+
+# Run v1r RSA key registration
+if [ $v1r -eq 1 ]; then
+    mkdir -p .auth
+    # Fix root-owned auth files from prior runs (docker exec without --user
+    # ran as root, creating files the dashboard user cannot overwrite).
+    # Host-side chown is reliable — the bind mount reflects host changes.
+    chown -R "$(id -u):$(id -g)" .auth/ 2>/dev/null || true
+    # Also fix from inside the container as a fallback for non-bind-mount setups.
+    docker exec pypowerwall chown -R "$(id -u):$(id -g)" /app/.auth/ 2>/dev/null || true
+    echo "Registering RSA key with Powerwall 3 (v1r mode)..."
+    echo "You will need your Tesla account credentials to complete registration."
+    # Run v1r registration as the dashboard user (not root) so auth files written
+    # to the bind-mounted .auth/ directory are owned by the host user, not root.
+    # This prevents PermissionError on subsequent runs.
+    docker exec -it --user "$(id -u):$(id -g)" pypowerwall python3 -m pypowerwall setup -v1r -authpath /app/.auth
+    if [ ! -f ".auth/tedapi_rsa_private.pem" ]; then
+        echo ""
+        echo "WARNING: RSA key not found at .auth/tedapi_rsa_private.pem"
+        echo "Registration may have failed or saved to a different location."
+        echo "Check container logs: docker logs pypowerwall"
+        echo ""
+    fi
+    chmod 700 .auth/
+    chmod 600 .auth/tedapi_rsa_private.pem 2>/dev/null
     echo "Restarting..."
     docker restart pypowerwall
     echo "-----------------------------------------"
@@ -635,7 +804,7 @@ fi
 
 # Run FleetAPI mode setup
 if [ "${config}" == "FleetAPI Cloud" ]; then
-    docker exec -it pypowerwall python3 -m pypowerwall fleetapi
+    docker exec -it pypowerwall python3 -m pypowerwall setup -fleetapi
     echo "Restarting..."
     docker restart pypowerwall
     echo "-----------------------------------------"
@@ -683,8 +852,11 @@ Open Grafana at http://localhost:9000/ ... use admin/admin for login.
 
 To complete *Grafana Setup*:
 
-* From 'Dashboard\Browse', select 'New/Import', browse to ${PWD}/dashboards
-  and upload ${DASHBOARD}.
+* From 'Dashboard/New', select 'Import dashboard', click "Upload dashboard JSON file", 
+  browse to ${PWD}/dashboards and upload ${DASHBOARD}.
+* For InfluxDB select "InfluxDB (Auto provisioned)" dropdown.
+* For Sun and Moon select "Sun and Moon (Auto provisioned)" dropdown.
+* Click "Import" button.
 
 NOTE: The datasources for InfluxDB and SunAndMoon are already configured.
 If you need to modify them via Configuration\Data Sources:

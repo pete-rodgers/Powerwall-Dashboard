@@ -22,8 +22,10 @@ pypowerwall.env
 telegraf.local
 
 # Auth files
-.auth/.pypowerwall.auth
-.auth/.pypowerwall.site
+.auth/
+
+# pypowerwall time series data
+.pypowerwall_data/
 
 # Local Dev files
 *.bak
@@ -52,3 +54,6 @@ tools/weather-history/weather-history.conf
 tools/ecowitt-weather-history/ecowitt-weather-history.conf
 tools/export/export.csv
 tools/export/export.xz
+issues/*
+sync.sh
+*.pyc

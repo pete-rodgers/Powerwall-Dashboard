@@ -1,5 +1,528 @@
 # RELEASE NOTES
 
+## v5.3.1 - Sun and Moon arc card & timezone validation fix
+
+### New Features
+
+* **Sun and Moon arc card in the Weather row** — a browser-rendered panel showing today's sun path with sunrise, sunset and solar noon; twilight and night shading; the sun at its current altitude; and the moon's track with a phase-shaped icon and % lit readout. It is a stock Grafana text panel rendering inline SVG — no plugin, no datasource, no queries. Positions are computed in the browser by a compact port of [SunCalc](https://github.com/mourner/suncalc), used under its BSD-2-Clause license and documented in `dashboards/THIRD_PARTY_LICENSES`. Location comes from the latitude and longitude that `setup.sh` already writes to the Sun and Moon datasource, so there is nothing new to enter on import; with no location set, the panel points you at `setup.sh` rather than drawing the wrong place. Handles polar day/night and the southern hemisphere, follows the Grafana light/dark theme, and redraws every minute and on resize. The two weather graphs are stacked so their time axes align, with the Sun and Moon card beside them. ([PR #868](https://github.com/jasonacox/Powerwall-Dashboard/pull/868) by **@holstein13**, follow-up to the Sun and Moon row exploration in [#805](https://github.com/jasonacox/Powerwall-Dashboard/pull/805))
+
+* **Opt-out dashboard for anyone not wanting the card** — `dashboards/dashboard-no-sunmoon.json` is identical to the default `dashboard.json` but without the Sun and Moon arc card. Import it instead of (or over) the default dashboard to skip the panel; see the [dashboards README](dashboards/README.md) for details.
+
+**Existing installs:** run `./upgrade.sh`, then re-import `dashboards/dashboard.json` to pick up the new panel. No datasource, InfluxDB or container changes are needed.
+
+### Bug Fixes
+
+* **`setup.sh` no longer accepts misspelled timezones** — entering a typo such as `American/Denver` (for `America/Denver`) used to pass validation because the last-resort check treated any value that `date` could parse as a POSIX TZ string, which glibc does for almost any alphabetic text. Setup then failed later in InfluxDB with `unable to find time zone American/Denver`. The timezone is written into the InfluxDB `tz('...')` clauses, which only resolve IANA names, so POSIX strings such as `GMT+5` could not work either. The POSIX fallback has been removed: valid IANA names (including `UTC`, `EST5EDT` and multi-level names like `America/Argentina/Buenos_Aires`) are still accepted, and anything else shows a warning with an example and a note that InfluxDB will fail, before the existing explicit `y/N` override. ([PR #873](https://github.com/jasonacox/Powerwall-Dashboard/pull/873) by **@jasonacox-sam**, closes [#872](https://github.com/jasonacox/Powerwall-Dashboard/issues/872) reported by **@hulkster**)
+
+### Contributors
+
+Thanks to **@holstein13** for the Sun and Moon arc card — a fully self-contained panel that matches the dashboard's palette and typography — and for iterating on the layout, horizon smoothing and DST handling. The `setup.sh` timezone validation fix came from **@jasonacox-sam**, prompted by a report from **@hulkster**.
+
+## v5.3.0 - Powerwall 3 temperatures and fans
+
+### New Features
+
+* **Powerwall 3 temperatures and fan speeds are back in the dashboard** — the pinned pypowerwall proxy moves from `0.17.0t100` to `0.18.2t104`, which reports Powerwall 3 data the proxy used to return as empty (`{}`). The existing **Powerwall Temps and Fans** panel in `dashboard.json` (and the temperature panels in the alt, min-mean-max and no-animation dashboards) fill in automatically. Run `./upgrade.sh`; no dashboard re-import or InfluxDB change is needed for this.
+    * **Temperatures** (proxy t102, pypowerwall 0.17.4, [pypowerwall#390](https://github.com/jasonacox/pypowerwall/pull/390)): `/temps/pw` reports each Powerwall 3's (and expansion pack's) hottest battery-pack temperature as `PWn_temp`, numbered like `/pod`.
+    * **Fans** (proxy t104, pypowerwall 0.18.2, [pypowerwall#398](https://github.com/jasonacox/pypowerwall/pull/398)): each Powerwall 3 inverter has two fans, reported by `/fans/pw` as `FANn_actual` (measured RPM) after any Powerwall 2 fans, leader first. Powerwall 3 has no target-RPM signal, so the dashed "Target" lines stay empty for Powerwall 3 fans. The panel shows fans 1-6, which covers up to three Powerwall 3s. The proxy also reports each fan's drive duty cycle (`FANn_duty`, %), which is stored in the raw data but not charted.
+    * PW3 temperatures and fans come from the gateway's TEDAPI interface, so they need a TEDAPI (full, v1r or hybrid) setup, as the rest of the vitals do.
+    * This applies to the standard Docker Compose install. The community Kubernetes manifests in `tools/k3s` pin their own proxy version (`0.11.1t64`) and dashboards, and aren't changed by this release.
+
+### Updates
+
+* **pypowerwall proxy `0.18.2t104`** — also includes, since `0.17.0t100`:
+    * **v1r LAN-down failover to the Gateway WiFi host**, race-free failover recovery and several TEDAPI hardening fixes ([pypowerwall#394](https://github.com/jasonacox/pypowerwall/pull/394), [pypowerwall#395](https://github.com/jasonacox/pypowerwall/pull/395)); `/health` reports the failover state
+    * **Tesla Remote Meter** (`trm_mb`) support: `/vitals` gains `TRM--<din>` blocks, and `/aggregates` falls back to the remote meter for site and solar readings (pypowerwall 0.17.4)
+    * Firmware change tracking in the proxy log (`PW_FIRMWARE_CHECK_INTERVAL`, [#854](https://github.com/jasonacox/Powerwall-Dashboard/discussions/854))
+    * Powerwall 3 `get_battery_block()` fix in WiFi/TEDAPI mode ([pypowerwall#396](https://github.com/jasonacox/pypowerwall/pull/396)), cloud-mode recovery when Tesla re-provisions a site, and per-gateway TEDAPI API locks
+
+### Bug Fixes
+
+* **Powerwall Temps and Fans panel: PW7-PW12 were off by one** — in `dashboard.json`, the series labeled PW7 through PW12 each charted the previous Powerwall's temperature (PW7 showed PW6, and so on), and PW12 appeared twice. Each label now charts its own Powerwall. This only affects systems with 7 or more Powerwalls; to pick it up, re-import `dashboards/dashboard.json`.
+
+### Contributors
+
+Thanks to everyone who reported missing Powerwall 3 temperatures and fan data, and to **@jasonacox-sam** for independent testing of the Powerwall 3 temperature and fan signals on hardware.
+
+## v5.2.5 - TEDAPI diagnostics & upgrade.sh env file check
+
+### New Features
+
+* **`verify.sh --tedapi`** — new detailed Gateway WiFi/TEDAPI diagnostics mode that reports Gateway WiFi signal strength and TEDAPI connectivity, to help debug SolarOnly-fallback and missing-vitals symptoms. `TEDAPI_HOST` is parsed as `host:port` where present, `PW_HOST` is masked in output so logs are safe to share, and the final verdict is TEDAPI-aware. ([PR #857](https://github.com/jasonacox/Powerwall-Dashboard/pull/857) by **@jasonacox-sam**)
+
+### Bug Fixes
+
+* **`upgrade.sh` detects unquoted env values containing spaces** — older or hand-edited installations can carry an unquoted value in `grafana.env` (e.g. `GF_AUTH_ANONYMOUS_ORG_NAME=Main Org.`). When `compose-dash.sh` sources the file, the shell tries to run the word after the space as a command, producing the cryptic `grafana.env: line 22: Org.: command not found` failure during `./upgrade.sh`. `upgrade.sh` now checks for this just after the Grafana env file is created/verified: it prints a pointed error showing the offending line(s) and the correct quoted form, and offers to add the quotes automatically (original saved as `grafana.env.bak`); declining exits with instructions to fix it manually. ([PR #860](https://github.com/jasonacox/Powerwall-Dashboard/pull/860), closes [#859](https://github.com/jasonacox/Powerwall-Dashboard/issues/859))
+
+### Contributors
+
+Thanks to **@dkerr64** for reporting the unquoted `grafana.env` failure and for the `shellcheck` suggestion — an optional shellcheck CI check for the project's shell scripts will follow separately.
+
+## v5.2.4 - Upgrade pypowerwall proxy to v0.17.0t100 (SolarOnly recovery fix)
+
+### Updates
+
+* **pypowerwall proxy `0.17.0t100`** — bumps the pinned proxy image from `0.16.2t97`. Notable changes since 0.16.2:
+    * **fix: TEDAPI auto-recovery wedge** — after a fully-failed reconnect attempt, the SolarOnly fallback recovery thread could stall permanently, leaving the proxy serving solar-only data until the container was restarted. Recovery now retries reliably (initial 60s interval, capped at 300s). Reported by @dthorndyke ([pypowerwall#366](https://github.com/jasonacox/pypowerwall/issues/366), fixed in [pypowerwall#367](https://github.com/jasonacox/pypowerwall/pull/367), shipped in pypowerwall v0.16.4). This is the "no longer recovers from SolarOnly mode after upgrading to v5.2.3" symptom reported in [#855](https://github.com/jasonacox/Powerwall-Dashboard/discussions/855) — the underlying network drops to the TEDAPI gateway path are unchanged, but the proxy now recovers from them again.
+    * **feat(tedapi):** lifetime energy accumulators merged into `/api/meters/aggregates` ([pypowerwall#372](https://github.com/jasonacox/pypowerwall/pull/372), pypowerwall v0.16.5)
+    * **feat(proxy):** optional bearer-token auth mode for the proxy API ([pypowerwall#359](https://github.com/jasonacox/pypowerwall/pull/359) by **@Nexarian**, pypowerwall v0.17.0)
+    * **fix(tedapi):** `TEDAPIApiVersion` is now comparable, and a `Content-Type` typo (`octet-string` → `octet-stream`) was corrected ([pypowerwall#363](https://github.com/jasonacox/pypowerwall/pull/363), [pypowerwall#364](https://github.com/jasonacox/pypowerwall/pull/364) by **@Nexarian**)
+
+No dashboard re-import is needed — run `./upgrade.sh` and the stack is recreated with the new image. `PW_TEDAPI_RECOVERY` remains on by default (`yes`).
+
+### Contributors
+
+Thanks to **@ViktorJp** for reporting the SolarOnly recovery failure on v5.2.3 ([#855](https://github.com/jasonacox/Powerwall-Dashboard/discussions/855)), to **@dthorndyke** for the precise upstream report of the recovery wedge ([pypowerwall#366](https://github.com/jasonacox/pypowerwall/issues/366)), and to **@Nexarian** for the bearer auth mode and TEDAPI fixes carried in this image.
+
+## v5.2.3 - Powerwall MCP server & pypowerwall time series data directory
+
+### New Features
+
+* **`tools/powerwall-mcp/`** — a new optional, self-contained MCP (Model Context Protocol) server that lets AI agents (Claude, Open WebUI, Hermes, etc.) query the dashboard's InfluxDB 1.8 data in plain language. It understands that the Telegraf exporter writes the same measurement names into multiple retention policies (`autogen`, `raw`, `vitals`, `kwh`, `daily`, `grid`, `pod`, `alerts`), so it can generate correct queries against the right data. Includes a standalone `Dockerfile`/`docker-compose.yml` (separate from the main dashboard stack), SELECT-only query validation, optional bearer-token auth, bounded query results, and a mock client with regression tests. Based on [ampersandru/powerwall-dashboard-mcp](https://github.com/ampersandru/powerwall-dashboard-mcp) (MIT-licensed, contributed by the original author). ([PR #850](https://github.com/jasonacox/Powerwall-Dashboard/pull/850) by **@jasonacox-sam**, closes [#848](https://github.com/jasonacox/Powerwall-Dashboard/issues/848))
+* **pypowerwall time series data directory** — laying groundwork for an upcoming `pypowerwall-server` time series feature (which will eventually replace the current proxy), `powerwall.yml` now bind-mounts a new `.pypowerwall_data/` directory to `/data` in the `pypowerwall` container. `setup.sh` and `upgrade.sh` create this directory automatically and chown it to `PWD_USER` (the uid:gid the container actually runs as, per `powerwall.yml`) so Docker doesn't auto-create it as `root` on first container start — which would otherwise cause permission errors, including for installs where the configured `PWD_USER` differs from the invoking host user. `verify.sh` now also checks that `.pypowerwall_data/` exists and is writable by the `pypowerwall` container.
+
+### Updates
+
+* **weather411 v0.2.5** — hardened the OpenWeatherMap fetch loop: the configured `TIMEOUT` is now actually passed to the HTTP request (previously it was read and reported but never used, so a hung connect/read could stall the fetch thread indefinitely), non-200 responses now log the HTTP status code along with OpenWeatherMap's error message (e.g. `401 Invalid API key`, `429 rate limited`), and exception handlers now report the real underlying error (DNS failure, connection refused, TLS, JSON decode, etc.) instead of a generic message — all on stderr, so the detail is visible in `docker logs` even with `DEBUG` disabled. Same treatment for the InfluxDB write error path. Inspired by the debugging of [#849](https://github.com/jasonacox/Powerwall-Dashboard/discussions/849) (thanks @anderep!).
+
+### Contributors
+
+Thanks to **@jasonacox-sam** (Sam Cox) for contributing the Powerwall MCP server ([PR #850](https://github.com/jasonacox/Powerwall-Dashboard/pull/850)), and to **@ampersandru** for the original [powerwall-dashboard-mcp](https://github.com/ampersandru/powerwall-dashboard-mcp) implementation it's based on.
+
+## v5.2.2 - pypowerwall ulimits & weather411 0.2.4
+
+### Bug Fixes
+
+* **pypowerwall `nofile` ulimits** — the `pypowerwall` container in `powerwall.yml` now has explicit `nofile` soft/hard ulimits set to `65536`, matching the existing `influxdb` and `grafana` services. This prevents `[Errno 24] Too many open files` errors in the pypowerwall logs under heavy load. ([PR #846](https://github.com/jasonacox/Powerwall-Dashboard/pull/846) by **@johncuthbertuk**)
+
+### Updates
+
+* **weather411 v0.2.4** — bumped the `weather411` container image to `0.2.4`.
+
+### Contributors
+
+Thanks to **@johncuthbertuk** for reporting and fixing the missing ulimits ([pypowerwall#369](https://github.com/jasonacox/pypowerwall/issues/369), [PR #846](https://github.com/jasonacox/Powerwall-Dashboard/pull/846)).
+
+## v5.2.1 - Restore Script: Companion restore.sh for backup.sh
+
+### Upgrading
+
+* **Grafana datasource UID change** — auto-provisioned InfluxDB and Sun/Moon datasources now have explicit, stable UIDs (`pwd-influxdb-auto` and `pwd-sunandmoon-auto`) instead of Grafana-generated ones. This prevents UID collisions and drift across reprovisioning. **Existing installs:** after upgrading, Grafana will create new datasource entries with the pinned UIDs. If dashboards show "datasource not found" on affected panels, either re-import the dashboard or re-link the panel datasource to the same-named entry in the Grafana UI. ([PR #840](https://github.com/jasonacox/Powerwall-Dashboard/pull/840) by **@youzer-name**)
+
+### New Features
+
+* **Restore script** — new `backups/restore.sh.sample`, an automated companion to `backup.sh.sample`, based on `restore_v16a.sh` by **@JonMurphy** ([#836](https://github.com/jasonacox/Powerwall-Dashboard/issues/836)). One command restores a backup archive on the same machine or migrates to a new one:
+  - Auto-detects the Powerwall-Dashboard directory from the script's own location
+  - Checks staging disk space before extracting (warns and offers `TMPDIR` override — protects RAM-backed `/tmp` from multi-GB archives)
+  - Non-destructive — moves existing InfluxDB `data`/`meta`/`wal` and `grafana.db` aside as `.pre-restore.<timestamp>` copies (rollback path) instead of deleting
+  - Restores InfluxDB from the `influxd backup -portable` snapshot into a clean instance, then re-creates continuous queries from the archive's `continuous_queries.txt` (live CQ state, including customizations) with `influxdb.sql` as fallback — `influxd restore -portable` does not reliably restore CQs (known InfluxDB 1.x limitation). CQ replay output is checked for errors (the influx CLI exits 0 even on failed statements).
+  - Restores Grafana database and provisioning files with correct ownership, deriving `PWD_USER` as the invoking user's `uid:gid` (`SUDO_UID:SUDO_GID`) — the same convention `setup.sh` uses — with a guard against running from a root shell
+  - Restores user configuration files (`*.env`, `telegraf.local`, etc.) while **skipping git-managed project files** (`powerwall.yml`, `telegraf.conf`, `influxdb.conf`, `VERSION`) so an older backup can never downgrade the stack or break future `git pull`/upgrades
+  - Restores `weather/weather411.conf` and `.auth/` Tesla cloud tokens (when present in the archive), so cross-machine migrations keep weather and cloud-mode credentials without re-authenticating
+  - Finishes with `compose-dash.sh up -d` so containers are **recreated** and restored settings (including the rewritten `PWD_USER`) actually take effect
+* **Backup script** — `backup.sh.sample` now auto-detects the dashboard directory (no more editing `DASHBOARD=` by hand), verifies the influxdb container is running and checks dashboard-disk free space *before* taking the snapshot, exports live continuous queries into the archive as a safety net, captures `weather/weather411.conf` and `.auth/` tokens, checks the exit code of `influxd backup` (no more silently archiving a failed snapshot), verifies archive integrity after creation, creates archives with mode 600 (they contain credentials), and aborts with a clear message if the staging area can't hold the snapshot (with `TMPDIR` override).
+
+### Documentation
+
+* `backups/README.md` — documents the restore script as the recommended method; manual restore steps retained as a fallback and corrected to exclude git-managed files and use `compose-dash.sh up -d`.
+
+### Contributors
+
+Thanks to **@JonMurphy** for the original `restore_v16a.sh` script, testing, and the detailed restore-procedure feedback in [#836](https://github.com/jasonacox/Powerwall-Dashboard/issues/836).
+
+### Links
+
+* Reported in [#836](https://github.com/jasonacox/Powerwall-Dashboard/issues/836)
+* Added in [PR #838](https://github.com/jasonacox/Powerwall-Dashboard/pull/838)
+## v5.2.0 - Backup Overhaul, Outage Export, verify.sh Fixes & More
+
+### Backup Script Improvements
+
+* **InfluxDB consistent snapshots** — the backup script now archives the InfluxDB **snapshot** (via `influxd backup -portable`) instead of tarring the live `influxdb/` directory while InfluxDB is actively writing. This eliminates the `file changed as we read it` warnings and eliminates the risk of archive corruption from concurrent writes. The `-portable` flag produces a version-independent snapshot that can be restored reliably on any InfluxDB 1.x instance.
+* **Grafana database backup** — `grafana.db` is now backed up using `sqlite3 .backup` (SQLite's online backup API) for a consistent copy. Falls back to `cp -a` if sqlite3 is not installed on the host, with a hint to `sudo apt install sqlite3`.
+* **Configuration files backup** — all `.env`, `.conf`, and `.yml`/`.yaml` files at the dashboard root are now included in the archive, making disaster recovery straightforward. A fixed `CONFIG_FILES` array guarantees essentials (`compose.env`, `pypowerwall.env`, `telegraf.local`, etc.) are always captured; globs catch anything additional.
+* **Staging directory with trap cleanup** — the script uses `mktemp -d` for staging with a trap to clean up on exit.
+* **Proper quoting** — all variable references are properly quoted throughout the script.
+
+### New Features
+
+* **Outage export script** — `tools/export_outages/export_outages.py` by **@ondrejch** exports grid outage data from InfluxDB as CSV. Reads `grid_status` from `powerwall.grid.http`, merges consecutive readings into outage intervals, and outputs columns: StartTime, EndTime, DurationMinutes, StatusValue. Supports `all`, `today`, `yesterday`, or custom date ranges. ([PR #833](https://github.com/jasonacox/Powerwall-Dashboard/pull/833))
+
+### Bug Fixes
+
+* **verify.sh `--debug` mode and `bc` fix** — adds `--debug` flag that disables `set -e` and enables `set -x` tracing so users can see exactly where the script fails. Makes the `bc` call non-fatal — if `bc` is not installed, falls back to the raw battery level with a visible warning instead of silently killing the script. Fixes [#827](https://github.com/jasonacox/Powerwall-Dashboard/issues/827) reported by **@hatchjdecho**. ([PR #834](https://github.com/jasonacox/Powerwall-Dashboard/pull/834))
+
+### Documentation
+
+* **Debian Docker installation instructions** — adds a Debian section to `tools/DOCKER.md` with steps tested on Debian Trixie (v13), including the correct Docker GPG key and apt repository paths. Based on testing by **@JonMurphy**. ([#831](https://github.com/jasonacox/Powerwall-Dashboard/issues/831), [PR #832](https://github.com/jasonacox/Powerwall-Dashboard/pull/832))
+
+### Backup Archive Structure
+
+```
+influxdb/     # InfluxDB portable snapshot (metadata + shard data)
+grafana/      # grafana.db (consistent copy) + provisions/
+config/       # .env, .conf, .yml/.yaml configuration files
+```
+
+### Files Changed
+
+* `backups/backup.sh.sample` — rewritten with three-part backup approach
+* `backups/README.md` — updated backup format description, restore instructions, and automation guide
+* `tools/export_outages/export_outages.py` — new outage export tool
+* `tools/export_outages/README.md` — usage documentation
+* `tools/DOCKER.md` — Debian installation instructions
+* `verify.sh` — `--debug` mode and non-fatal `bc`
+* `VERSION` — `5.1.7` → `5.2.0`
+* `upgrade.sh` — version consistency
+
+### Contributors
+
+Thanks to the community members who made this release possible:
+
+* **@JonMurphy** — reported the backup corruption issue (#825), tested every iteration of the backup script, suggested the `-portable` flag, reviewed config backup scope, tested Debian Docker instructions (#831), and confirmed the final build A-OK
+* **@hulkster** — verified weather data backup coverage and asked about historical weather import options
+* **@ondrejch** — contributed the outage export script `export_outages.py` (PR #833)
+* **@hatchjdecho** — reported the verify.sh silent exit bug (#827) with detailed troubleshooting
+
+### Links
+
+* Backup issue: [#825](https://github.com/jasonacox/Powerwall-Dashboard/issues/825)
+* Backup PR: [#826](https://github.com/jasonacox/Powerwall-Dashboard/pull/826)
+* Outage export: [PR #833](https://github.com/jasonacox/Powerwall-Dashboard/pull/833)
+* verify.sh fix: [#827](https://github.com/jasonacox/Powerwall-Dashboard/issues/827) / [PR #834](https://github.com/jasonacox/Powerwall-Dashboard/pull/834)
+* Debian Docker docs: [#831](https://github.com/jasonacox/Powerwall-Dashboard/issues/831) / [PR #832](https://github.com/jasonacox/Powerwall-Dashboard/pull/832)
+
+## v5.1.7 - Upgrade pypowerwall Proxy to v0.16.2t97
+
+### Upgrade
+
+* Upgrades the pypowerwall proxy container from `v0.15.13t94` to `v0.16.2t97`.
+
+### What's New in the Proxy (v0.15.13t94 → v0.16.2t97)
+
+**v0.16.2t97 — TEDAPI Fallback, v1r Diagnostics, and Firmware Version Improvements**
+
+* **feat(proxy): TEDAPI SolarOnly fallback auto-recovery** — when TEDAPI connectivity is lost after a startup network blip, the proxy can continue serving solar data without interruption and recover automatically when `PW_TEDAPI_RECOVERY=yes` is set in `pypowerwall.env`. This recovery path is opt-in and disabled by default. Added for [#821](https://github.com/jasonacox/Powerwall-Dashboard/issues/821).
+  * Background probe thread retries with exponential backoff (60s → 300s max); hardware-verified on live PW3+follower
+  * `/health` and `/stats` now include a `fallback_mode` block with status, reason, and recovery attempt count
+  * `POST /health/reset` resets fallback state and triggers an immediate recovery attempt
+* **fix(v1r):** `PENDING_VERIFICATION` and `UNKNOWN_KEY_ID` auth warnings now surface at normal log level — previously required `PW_DEBUG=yes`
+* **feat(tedapi):** `get_firmware_version()` unified across `V2024_06`/`V2026_06` query sets and basic/v1r transports
+* **fix(proxy image):** the `pypowerwall` image's Dockerfile `HEALTHCHECK` now uses `curl` — the prior `wget`-based check failed silently on Alpine and could mark the proxy `(unhealthy)` even when it was running normally. Powerwall-Dashboard's compose-level `pypowerwall` healthcheck in `powerwall.yml` remains a separate check.
+
+**v0.16.1 — Windows TLS Fix for Tesla Auth**
+
+* **fix(windows):** TLS capped to 1.2 on Windows to fix `403 Forbidden` during Tesla PKCE auth flow — the Windows OpenSSL TLS 1.3 fingerprint was being rejected by Tesla during token exchange. Linux/macOS retain TLS 1.3.
+* **fix(register):** `api_call()` now uses httpx with HTTP/2 for Tesla API endpoints (Tesla now requires HTTP/2 for `owner-api.teslamotors.com` calls as of June 2026)
+
+**v0.16.0 — Code Review Fixes: Correctness, Security, and Robustness**
+
+* **fix(critical):** `set_operation()`/`set_mode()` no longer silently lowers battery reserve — scale-aware fix per backend
+* **fix(critical):** Proxy degradation-cache crash fixed — `/csv` and `/json` crashed with `AttributeError` during gateway outages
+* **fix(critical):** `alerts(alertsonly=False)` crash fixed — `TypeError` since introduction
+* **fix(critical):** FleetAPI token refresh wedge fixed — stuck `refreshing` flag could permanently block the client
+* **fix(security):** Proxy DISABLED/ALLOWLIST matching no longer bypassable via query string
+* **fix(security):** Unallowlisted `/api/*` paths no longer proxied to gateway with proxy's credentials
+* **fix(security):** GET `/control/max_backup` CSRF hardening; constant-time token comparison; 4KB POST body cap
+* **fix(security):** `/help` stored XSS fixed; credential files now created `0600` atomically; tokens redacted from debug logs
+* **fix(performance):** Local negative caching now actually works; native lock timeouts removed
+* **fix(perf):** FleetAPI reuses one HTTP/2 client and never re-sends POSTs after transmission (eliminates duplicate write commands)
+* **fix:** 19 crash-on-None fixes across all backends and the proxy
+* 224 regression tests passing (up from 123 pre-v0.16.0); hardware-verified against TEDAPI WiFi, v1r+WiFi hybrid, Cloud, and FleetAPI modes
+## v5.1.6 - Upgrade Script Grafana Teardown Guard
+
+### Bug Fix
+
+* Guard the Grafana container teardown in `upgrade.sh` with an existence check (`docker ps -aq -f name=^grafana$`), matching the pattern already used for `pypowerwall`, `telegraf`, `weather411`, and `tesla-history`. Previously, if no Grafana container existed, `docker stop grafana` returned a non-zero status and aborted the upgrade before the stack could be updated or restarted. In migration paths that had already stopped services, this could leave the stack down. This affected users who disable the bundled Grafana via a compose override (`profiles: ["disabled"]`) to reuse an existing Grafana instance.
+  - Reported in [#819](https://github.com/jasonacox/Powerwall-Dashboard/issues/819). Fixed in [PR #820](https://github.com/jasonacox/Powerwall-Dashboard/pull/820).
+
+## v5.1.5 - Inverter Power Panel Fix (4-string & 6-string Systems)
+
+### Bug Fix
+
+* Fix the **Inverter Power** panel showing "No data" on systems with fewer than 6 strings per inverter — the majority of residential single-inverter installs. The `cq_inverters` continuous query computes `InverterN = A_Power+B_Power+C_Power+D_Power+E_Power+F_Power`; on 4-string systems, `E_Power`/`F_Power` don't exist in `raw.http`, and InfluxDB binary arithmetic returns `null` for the entire sum when any operand is missing.
+  - **Fix:** Each `InverterN` target is replaced with two `rawQuery` sub-queries — one for base strings (A–D, always present) and one for extended strings (E–F, present only on 6-string systems). Grafana stacking combines them correctly.
+  - No continuous query changes needed — historical per-string data is read directly from the `strings` retention policy as-is.
+  - Applied to `dashboard.json`, `dashboard-alt.json`, `dashboard-min-mean-max.json`, and `dashboard-no-animation.json`.
+  - Reported by @abains in [#814](https://github.com/jasonacox/Powerwall-Dashboard/issues/814). Fixed in [PR #815](https://github.com/jasonacox/Powerwall-Dashboard/pull/815).
+
+## v5.1.4 - Weather411 Healthcheck Fix
+
+### Bug Fix
+
+* Revert the `weather411` healthcheck back to `wget`. PR #809 changed both `pypowerwall` and `weather411` healthchecks from `wget` to `curl`, but the `weather411` container is built on `python:3.8-alpine` which ships with `wget` (busybox) — not `curl`. This caused Docker to mark `weather411` as `(unhealthy)`.
+  - The `pypowerwall` healthcheck correctly stays on `curl` since that container uses `python:3.10-slim` (Debian).
+  - Reported by @jasonacox after merging [#809](https://github.com/jasonacox/Powerwall-Dashboard/pull/809).
+
+## v5.1.3 - Healthcheck Fix (wget → curl)
+
+### Bug Fix
+
+* Replace `wget` healthchecks with `curl -sf` in `powerwall.yml` for the `pypowerwall` service. The `pypowerwall` container was switched from Alpine to `python:3.10-slim` (Debian-slim) in v5.1.2 to fix Tesla TLS fingerprint issues — but Debian-slim does not ship with `wget`, causing Docker to mark the container `(unhealthy)` even when it was serving data correctly. `curl` is already present in the Debian-slim image and is already used by the `influxdb` and `grafana` healthchecks.
+  - The `pypowerwall` healthcheck now uses the `/health` endpoint (`curl -sf http://pypowerwall:8675/health > /dev/null`).
+  - Reported in [#808](https://github.com/jasonacox/Powerwall-Dashboard/issues/808). Fixed in [PR #809](https://github.com/jasonacox/Powerwall-Dashboard/pull/809).
+
+## v5.1.2 - Proxy Docker Reliability Fixes
+
+### pyPowerwall Update
+
+* Update pypowerwall proxy Docker image to `0.15.13t94`.
+  - **Zombie process fix (PID 1):** Installs a `SIGCHLD` handler in `proxy/server.py` to reap terminated healthcheck child processes, and adds `tini` to the Dockerfile as defense-in-depth. Without this fix, each 30-second `wget` healthcheck spawned by Docker's `HEALTHCHECK` becomes an unreaped `<defunct>` zombie that accumulates for the life of the container and can eventually exhaust the PID table. Affects any deployment where the container runs as PID 1 (the default). ([pypowerwall PR #343](https://github.com/jasonacox/pypowerwall/pull/343))
+  - **Alpine → Debian-slim base switch:** Switches all four Docker build platforms from `python:3.10-alpine` (musl libc) to `python:3.10-slim` (Debian/glibc). Alpine's musl libc produces a TLS ClientHello fingerprint that Tesla rejects for token refresh requests after the initial access token expires (~8 hours), causing `403 token expired` errors in long-running Docker deployments. This is the same root cause already fixed in tesla-history (v5.0.11). ([pypowerwall PR #345](https://github.com/jasonacox/pypowerwall/pull/345))
+
+
+## v5.1.1 - Bug Fix Release
+
+### Bug Fix
+
+* Fix `grafana.env` shell error when anonymous access is enabled: `GF_AUTH_ANONYMOUS_ORG_NAME="Main Org."` was written without quotes, causing `bash` to interpret `Org.` as a separate command when `compose-dash.sh` sources the file. The value is now quoted in both `anonymous-access.sh` and `grafana.env.sample`.
+  - Reported by @JonMurphy after upgrading to v5.1.0; fix identified by @mccahan.
+
+### Documentation
+
+* Clarify v1r mode password prompt — the password comes from the QR sticker on the Powerwall 3 unit, not the Gateway. Updated both `setup.sh` and README.md to eliminate ambiguity for PW3 owners who also have a separate Gateway device.
+  - Reported by @michalperth in [Discussion #784](https://github.com/jasonacox/Powerwall-Dashboard/discussions/784).
+
+## v5.1.0 - Anonymous Dashboard Access
+
+### New Feature
+
+* Add anonymous access mode for Grafana dashboard — allows running the dashboard without a login prompt on trusted/private networks.
+  - New `anonymous-access.sh` script invoked during `setup.sh` to configure access mode.
+  - Three options: Username/Password (default), Anonymous Read-Only, Anonymous Read/Write.
+  - Re-runnable: users can change access mode at any time by re-running `setup.sh`.
+  - Cleans up previous configuration before applying new settings.
+  - Contributed by @mccahan ([PR #583](https://github.com/jasonacox/Powerwall-Dashboard/pull/583)).
+
+## v5.0.11 - tesla-history Docker Fix (Alpine → Debian)
+
+### tesla-history Update
+
+* Update tesla-history to v0.1.9.
+  - Switch Dockerfile from `python:3.11-alpine` to `python:3.11-slim` (Debian-based).
+    Alpine's musl libc produces a TLS ClientHello fingerprint that Tesla rejects, causing `403` errors after token refresh. Debian-based images use OpenSSL, which produces the accepted fingerprint.
+  - Add `httpx` and `h2` to the Docker image dependencies to enable HTTP/2 for all Tesla API calls.
+  - Require `pypowerwall>=0.15.12` in the Dockerfile and README install instructions to ensure the HTTP/2 auth fix and improved token handling are always included.
+
+### Documentation
+
+* Updated `tools/tesla-history/README.md` pip install instructions to require `pypowerwall>=0.15.12`, `httpx`, and `h2`.
+
+## v5.0.10 - Cloud Mode Fix (Token + HTTP/2)
+
+### pyPowerwall Update
+
+* Update pypowerwall Docker image to `0.15.12t93` (proxy t93).
+  - Fixes Tesla Owner API Cloud mode authentication by adding HTTP/2 support for all Tesla auth and API endpoints.
+  - Resolves the `401`/`403` errors that affected Cloud mode (Option 2) users since Tesla's June 2026 protocol change requiring HTTP/2.
+  - Adds improved token handling for SSH/headless setups — both Access Token and Refresh Token are now required during setup.
+  - See [pypowerwall PR #333](https://github.com/jasonacox/pypowerwall/pull/333) for details on the token input fix.
+
+### tesla-history Update
+
+* Update tesla-history to v0.1.8 — includes compatibility fixes for the new auth flow.
+
+### Documentation
+
+* Updated README.md Cloud mode section to document the new token-based auth process (Access Token + Refresh Token required).
+* Added note about the HTTP/2 requirement and minimum version (v5.0.10).
+* Added reference to the [tesla_auth](https://github.com/adriankumpf/tesla_auth) desktop app as an alternative token generation method for headless users.
+
+## v5.0.9 - Tesla Owner API HTTP/2 Fix
+
+### pyPowerwall Update
+
+* Update pypowerwall Docker image to `0.15.11t93` (proxy t93).
+  - Adds HTTP/2 support for Tesla Owner API authentication endpoints (`auth.tesla.com` and `owner-api.teslamotors.com`), resolving the `401`/`403` errors that affected Cloud mode (Option 2) users since Tesla's June 2026 protocol change.
+  - See [pypowerwall PR #326](https://github.com/jasonacox/pypowerwall/pull/326) for details.
+
+### Documentation
+
+* Removed the temporary Tesla Owner API Auth Change notices from README.md — the fix is now included in the default Docker image.
+
+## v5.0.8 - v1r Setup Fix and pyPowerwall Update
+
+### pyPowerwall Update
+
+* Update pypowerwall to v0.15.10 (proxy t90).
+  - v0.15.8+ correctly supports `-authpath` flag for v1r RSA key registration, allowing the key to be written to a custom directory instead of the default `/app/` location.
+  - This eliminates the permission error (`PermissionError: [Errno 13] Permission denied: '/app/tedapi_rsa_private.pem'`) that occurred when the container runs as a non-root user.
+
+### Setup Fixes
+
+* **Fixed v1r RSA key registration path:** `setup.sh` now passes `-authpath /app/.auth` to `pypowerwall setup -v1r`, which writes the RSA key directly to the bind-mounted `.auth/` directory. No manual key copying or root workarounds needed.
+* **Fixed RSA key path mismatch:** `PW_RSA_KEY_PATH` was set to `.auth/pypowerwall_rsa_key.pem` but v1r registration generates `tedapi_rsa_private.pem`. Corrected to `.auth/tedapi_rsa_private.pem`.
+* **Added post-registration verification:** After v1r registration, setup.sh verifies the RSA key file exists in `.auth/` and warns if registration may have failed.
+* **Added permission normalization:** `chmod -R a+r .auth/` runs after registration to ensure the runtime user can read the key file.
+* **Added mode assertion for existing installations:** When re-running `setup.sh` and keeping existing credentials, the script now validates that `pypowerwall.env` has the correct settings for the selected mode (v1r requires `PW_HOST`, `PW_GW_PWD`, and `PW_RSA_KEY_PATH`). Missing settings are prompted for and added.
+
+### Important Reminder
+
+Always use the project scripts to manage the stack:
+```bash
+./compose-dash.sh down
+./compose-dash.sh up -d
+```
+Plain `docker compose` does NOT source the environment files (`compose.env`, `grafana.env`, `pypowerwall.env`), which can cause settings to be silently ignored on restart.
+
+## v5.0.7 - Custom Grafana Port Support
+
+### Dashboard Updates
+
+* Fixed support for custom Grafana ports — users who changed `GF_SERVER_HTTP_PORT` in `grafana.env` from the default `9000` can now use `compose-dash.sh` and `verify.sh` without errors by @nadams5755 in https://github.com/jasonacox/Powerwall-Dashboard/pull/773
+  - `compose-dash.sh` now loads `grafana.env` alongside `compose.env` so Docker Compose sees the custom port.
+  - `powerwall.yml` Grafana healthcheck uses `${GF_SERVER_HTTP_PORT:-9000}` instead of hardcoded `9000`.
+  - `verify.sh` sources `grafana.env` and reads `GF_SERVER_HTTP_PORT` for the service check.
+  - Minor linting: cleaned up whitespace in `verify.sh` and added `|| true` to the terminal-settings RETURN trap to prevent `set -e` failures.
+
+## v5.0.6 - Powerwall 3 Wired LAN Support (v1r)
+
+### pyPowerwall Update
+
+* Update pypowerwall to v0.15.6 - includes significant new features and fixes from v0.14.10 through v0.15.6.
+  - **Powerwall 3 Wired LAN (v1r) Support** (v0.15.0): New TEDAPI transport for PW3 access over ethernet using RSA-4096 key authentication — no WiFi connection to `192.168.91.1` required. Includes new `pypowerwall setup -v1r` CLI command to generate and register an RSA key pair. Optional WiFi fallback (`PW_WIFI_HOST`) enables hybrid mode and Powerwall 3 follower data.
+  - **Island Mode Control** (v0.15.3): New `go_off_grid()` and `reconnect_grid()` functions for Powerwall island mode control.
+  - **Native Python Tesla Authentication** (v0.15.5): Replaces the external `tesla-auth` binary with a native Python WebView-based login flow. For SSH/headless setups, run `python3 -m pypowerwall authtoken` on a local machine to obtain a token and paste it during setup.
+  - **Host:port Support** (v0.14.10): Non-standard HTTPS port support (e.g. `192.168.1.50:8443`) for travel router and NAT proxy setups mapping multiple gateways to distinct `ip:port` endpoints.
+  - **Reserve Scaling & CLI Fixes** (v0.15.6): Fixed reserve percent scaling round-trip errors in TEDAPI v1r mode and FleetAPI SOC reporting. CLI redesigned with explicit connection mode flags.
+
+### Setup Updates
+
+* `setup.sh` updated to support new pypowerwall features:
+  - Added **mode 5 - Wired LAN (v1r)**: new interactive setup flow for Powerwall 3 ethernet access — prompts for wired LAN IP, full 10-character QR code gateway password, and optional WiFi fallback host (`PW_WIFI_HOST`) for hybrid mode and follower data. Automatically probes `192.168.91.1` and offers it as the WiFi fallback if reachable.
+  - After docker startup, runs `pypowerwall setup -v1r` inside the container to generate the RSA-4096 key pair and register it with the Powerwall via the Tesla Owner API.
+  - **Tesla Cloud mode** now displays a notice for SSH/remote users explaining how to obtain an auth token from a local machine: `pip install pypowerwall -U && python3 -m pypowerwall authtoken`.
+  - Updated FleetAPI setup to use `pypowerwall setup -fleetapi` (replacing the deprecated `pypowerwall fleetapi` command).
+
+## v5.0.5 - Tesla-History Auth Fix
+
+* Revise tesla-history script auth method to use refresh token and external Tesla Auth tool for cloud login by @mcbirse in https://github.com/jasonacox/Powerwall-Dashboard/pull/764 - addresses https://github.com/jasonacox/Powerwall-Dashboard/discussions/762
+* Minor dashboard fix with alerts panel to prevent alerts extending beyond current time when viewing with time ranges like Today, This week, etc. by @mcbirse in https://github.com/jasonacox/Powerwall-Dashboard/pull/764
+
+## v5.0.4 - Alerts Dashboard Fix
+
+### Dashboard Updates
+
+* Fixed Alerts State Timeline panel in Grafana 12, which was displaying empty rows for alert types that had no occurrences during the selected time period.
+  - **Problem**: The `state-timeline` panel was rendering a row for every alert field returned by InfluxDB, even when the field contained only `0` or `null` values throughout the selected time range. This resulted in a large number of empty, uninformative rows cluttering the panel.
+  - **Fix**: Added a `byValue` field override using Grafana's built-in "Fields with values" matcher, which hides any series where the maximum value does not equal `1`. A secondary `byType: time` override ensures the Time field is never inadvertently hidden by the first rule. Only alert rows that actually triggered (have at least one value of `1`) during the selected time range are displayed.
+  - Resolved "Data outside time range" UI errors while keeping the Alerts query in table format (`SELECT *::field`) by relying on override-based filtering and updated transformations instead of changing the query to time series format.
+  - Updated field rename transformation regex from `max_(.*)` → `$1` to `(alerts\.)?max_(.*)` → `$2` to strip the `alerts.max_` measurement prefix from row labels.
+
+## v5.0.3 - Grid Outage Fix
+
+### pyPowerwall Update
+
+* Update pypowerwall to v0.14.9 - TEDAPI voltage calculation fix for grid outage scenarios - addresses https://github.com/jasonacox/Powerwall-Dashboard/issues/683
+  - Fix `compute_LL_voltage()` function to handle `None` voltage values when grid is down
+  - Added `None` value handling in three-phase voltage calculations to prevent `TypeError` exceptions
+  - Prevents crashes in `/api/meters/aggregates` endpoint when grid is offline and voltage readings are unavailable
+  - Converts `None` voltage parameters to `0` before performing arithmetic operations
+  - Resolves issue where power flow stats were not displayed during real grid outages (Note: "Go off grid" via app did not trigger this issue)
+  - Added comprehensive unit tests to verify None handling behavior for all voltage scenarios
+
+## v5.0.2 - Dashboard Enhancements
+
+### Dashboard Updates
+
+* Add dynamic color and text to Current State panel by @caubert in https://github.com/jasonacox/Powerwall-Dashboard/pull/734
+  - Current State panel now displays descriptive text indicating the flow of power (e.g., "Grid Import", "Grid Export", "Charging Battery", etc.).
+  - Panel background color dynamically changes based on power flow state for improved visual feedback.
+
+### Bug Fixes
+
+* Fix false alarm in `upgrade.sh` that incorrectly reported "Grafana environmental settings are outdated" after upgrading to v5.0.0+.
+
+## v5.0.1 - Firmware 25.42.2+ Support
+
+### pyPowerwall Update
+
+* Update pypowerwall to v0.14.6 - Firmware 25.42.2+ support for gzip-compressed TEDAPI responses.
+  - Add gzip decompression support for firmware 25.42.2+ TEDAPI responses - Fix by @bolagnaise in https://github.com/jasonacox/pypowerwall/pull/251
+  - Gateway firmware 25.42.2 and later returns gzip-compressed responses for DIN and other TEDAPI endpoints
+  - Added `decompress_response()` helper function to handle both compressed and uncompressed responses transparently
+  - Updated all TEDAPI methods (`get_din()`, `get_config()`, `get_status()`, `get_device_controller()`, `get_firmware_version()`, `get_components()`, `get_battery_block()`) to decompress responses
+  - Added error handling for UnicodeDecodeError in DIN decode operation to gracefully handle corrupted or invalid responses
+  - Maintains backward compatibility with older firmware versions that return uncompressed responses
+
+## v5.0.0 - Grafana Upgrade
+
+### Major Updates
+
+* **Grafana Upgrade to v12.3**: Major version upgrade from Grafana 9.1.2 to 12.3-ubuntu, bringing significant improvements in performance, security, and features.
+  - Enhanced data source proxy with improved connection handling
+  - Better query performance and visualization capabilities
+  - Updated dashboard compatibility and new visualization options
+  - Improved security with latest upstream patches
+
+### Breaking Changes
+
+* **Dashboards**: Some older dashboard panels may need updates for compatibility with Grafana 12. A new dashboard.json has been added that updates panels: Savings, Self-Powered, and Current State.
+
+**Note**: This is a major version upgrade.
+
+## v4.9.0 - Performance Improvements
+
+### Proxy t86 (20 Dec 2025)
+
+This version introduces the pypowerwall proxy t86 based on pypowerwall v0.14.5. Optimizations are added for TEDAPI and should help with stability and performance for Powerwall 3 owners.
+
+* **Performance Caching System**:
+  - Added comprehensive performance caching layer for high-impact API routes
+  - Implemented `cached_route_handler()` pattern for consistent cache management across endpoints
+  - Added performance caching to: `/aggregates`, `/api/meters/aggregates`, `/vitals`, `/strings`, `/temps/pw`, `/alerts/pw`, `/freq`, `/pod`, `/json`, `/csv`, `/csv/v2` endpoints
+  - Shared cache optimization: `/aggregates` and `/api/meters/aggregates` use same cache key for identical payloads
+  - Optimized `/csv` and `/json` endpoints from 9 API calls to 6 calls (33% reduction) using aggregates consolidation
+  - Eliminated 400-600ms overhead from redundant `get_components()` fallback calls
+  - Typical performance improvements: 99.6% faster cached responses (764ms → 2.9ms for `/aggregates`)
+  - Cache memory monitoring added to `/stats` endpoint with detailed memory usage breakdown
+  - Average overall response time improvement: 58% reduction (165.7ms → 70.2ms)
+
+**Performance Metrics Comparison:**
+
+| API Route | Before (ms) | After (ms) | Improvement | Usage Count | Impact Reduction |
+|-----------|-------------|------------|-------------|-------------|------------------|
+| `/api/meters/aggregates` | 821.5 | 151.3 | **81.6%** ⚡ | 7,992 | 5,355 seconds saved |
+| `/aggregates` | 764.8 | 150.7 | **80.3%** ⚡ | 3,880 | 2,383 seconds saved |
+| `/strings` | 545.7 | 37.3 | **93.2%** ⚡ | 3,945 | 2,006 seconds saved |
+| `/vitals` | 339.3 | 33.9 | **90.0%** ⚡ | 3,946 | 1,205 seconds saved |
+| `/alerts/pw` | 382.9 | 87.8 | **77.1%** 🚀 | 3,881 | 1,145 seconds saved |
+| `/temps/pw` | 266.0 | 253.6 | **4.7%** ✅ | 3,880 | 48 seconds saved |
+
+*Total Impact Reduction: ~12,142 seconds (3.4 hours) of response time saved per 8-hour period*
+
+* **Performance Testing Tool**:
+  - Added [perf_test.py](https://github.com/jasonacox/pypowerwall/blob/main/proxy/perf_test.py) script for comprehensive API performance testing and analysis
+  - Tests 27 production API routes with impact scoring (response_time × usage_frequency)
+  - Provides min/max/average response times with color-coded performance indicators
+
+* **Bug Fixes**:
+  - Fixed undefined variable `cache_ttl_seconds` error in graceful degradation system
+  - Fixed TypeError in `/csv/v2` endpoint: removed invalid `force=False` parameter from `level()`, `grid_status()`, and `get_reserve()` calls
+  - Fixed variable shadowing bug in `grid_status()` method where `type` parameter shadowed Python's built-in `type()` function
+  - Renamed `type` parameter to `output_type` throughout codebase for consistency and correctness
+
+* **Code Quality & Maintainability**:
+  - Centralized cache logic in reusable helper functions for improved consistency
+  - Improved error handling and logging in `safe_pw_call()` wrapper
+  - Added unit tests for CSV endpoints (`TestCSVEndpoints` class with 7 test cases)
+  - Enhanced error tracking with network error summaries and endpoint statistics
+  - Enhanced documentation with comprehensive performance testing guide
+
+## v4.8.8 - Tesla-History Fix
+
+* Revise tesla-history script backup event history retrieval due to Tesla API changes by @mcbirse in https://github.com/jasonacox/Powerwall-Dashboard/pull/717 - addresses https://github.com/jasonacox/Powerwall-Dashboard/issues/714
+* Update tesla-history to use embedded TeslaPy component of pypowerwall (now required) - install by running `pip install pypowerwall`
+* Revise location detection in setup and weather script for improved error handling
+
+## v4.8.7 - PW3 Expansion Pack Fix
+
+* Update pypowerwall to v0.14.4 - See updates: https://github.com/jasonacox/pypowerwall/releases/tag/v0.14.4 with Powerwall 3 expansion pack energy data fixes and battery degradation metrics.
+* Fix expansion pack energy data by processing all BMS components in TEDAPI responses - improves data accuracy for systems with PW3 expansion packs by @rlerdorf in https://github.com/jasonacox/pypowerwall/pull/239
+* Add Powerwall battery degradation (capacity loss) tracking and visualization to dashboard.
+* Enhanced timezone validation in `setup.sh` with improved POSIX TZ string detection to reject invalid inputs like single digits.
+* Add timezone browsing feature with filtering support for easier timezone selection during setup.
+
 ## v4.8.6 - InfluxDB File Limits and Configuration Updates
 
 * Add ulimits configuration to InfluxDB service to resolve "too many open files" errors by setting soft and hard limits to 65536 by @cwagz in https://github.com/jasonacox/Powerwall-Dashboard/issues/705

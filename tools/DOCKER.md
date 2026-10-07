@@ -4,7 +4,9 @@ Docker is a requirement for running the Dashboard. This file contains some sugge
 
 Request for help: Please open an issue or submit a pull request for add changes or additions that would help others.
 
-## Ubuntu 20.04 and Ubuntu 22.10
+## Ubuntu
+
+**Note:** For the most up-to-date Docker installation instructions, refer to the official Docker documentation at https://docs.docker.com/engine/install/ubuntu/
 
 If you plan to use a VirtualBox virtual machine to host your Ubuntu server:
 
@@ -18,22 +20,28 @@ Docker Install
 # install dependencies
 sudo apt update
 sudo apt upgrade
-sudo apt install apt-transport-https curl gnupg-agent ca-certificates software-properties-common -y
+sudo apt install ca-certificates curl
 
-# install docker
-curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo apt-key add -
-sudo add-apt-repository "deb [arch=amd64] https://download.docker.com/linux/ubuntu focal stable"
-sudo apt install docker-ce docker-ce-cli containerd.io -y
+# Add Docker's official GPG key
+sudo install -m 0755 -d /etc/apt/keyrings
+sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+sudo chmod a+r /etc/apt/keyrings/docker.asc
+
+# Add the repository to Apt sources
+echo \
+  "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu \
+  $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | \
+  sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+sudo apt update
+
+# Install Docker
+sudo apt install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin -y
 
 # add local user to docker group so you can run docker commands
 sudo usermod -aG docker $USER
-newgrp docker
 
-# install docker compose
-sudo apt install docker-compose
-
-# verify it is running
-sudo systemctl status docker
+# Log out and back in (or reboot) for the group change to take effect
+# Then verify docker works without sudo:
 docker ps
 
 # make sure it starts on reboot
@@ -43,6 +51,53 @@ sudo systemctl enable docker
 git clone https://github.com/jasonacox/Powerwall-Dashboard.git
 cd Powerwall-Dashboard/
 ./setup.sh 
+```
+
+## Debian
+
+**Note:** For the most up-to-date Docker installation instructions, refer to the official Docker documentation at https://docs.docker.com/engine/install/debian/
+
+The install block below was tested on Debian Trixie (v13) and should also work on earlier versions (Bullseye, Bookworm) — only the repository codename will differ.
+
+```bash
+# install dependencies
+sudo apt update
+sudo apt upgrade
+sudo apt install ca-certificates curl
+
+# Add Docker's official GPG key (Debian repo, not Ubuntu)
+sudo install -m 0755 -d /etc/apt/keyrings
+sudo curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc
+sudo chmod a+r /etc/apt/keyrings/docker.asc
+
+# Add the repository to Apt sources (Debian repo, not Ubuntu)
+echo \
+  "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian \
+  $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | \
+  sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+sudo apt update
+
+# Install Docker
+sudo apt install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin -y
+
+# add local user to docker group so you can run docker commands
+sudo usermod -aG docker $USER
+
+# Log out and back in (or reboot) for the group change to take effect.
+# This is required — `newgrp docker` only creates a temporary subshell
+# and `setup.sh` may detect a mismatched uid:gid if the group hasn't
+# been applied to your session.
+#
+# After logging back in, verify docker works without sudo:
+docker ps
+
+# make sure it starts on reboot
+sudo systemctl enable docker
+
+# Powerwall Dashboard Setup
+git clone https://github.com/jasonacox/Powerwall-Dashboard.git
+cd Powerwall-Dashboard/
+./setup.sh
 ```
 
 ## MacOS
@@ -77,7 +132,8 @@ sudo apt install -y docker-compose
 
 # Add your user to docker group
 sudo usermod -aG docker $USER
-newgrp docker
+
+# Log out and back in (or reboot) for the group change to take effect
 
 # Set docker to start on boot
 sudo systemctl enable docker.service

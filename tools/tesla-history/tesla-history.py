@@ -9,7 +9,7 @@
 
  Usage:
     * Install the required python modules (not required if run from docker):
-        pip install python-dateutil teslapy influxdb
+        pip install "pypowerwall>=0.15.12" python-dateutil influxdb httpx h2
 
     * Or, if running as a docker container, replace below examples with:
         docker exec -it tesla-history python3 tesla-history.py [arguments]
@@ -52,6 +52,7 @@ import signal
 import argparse
 import configparser
 import time
+from pathlib import Path
 from datetime import datetime, timedelta
 try:
     from dateutil.relativedelta import relativedelta
@@ -60,17 +61,17 @@ try:
 except:
     sys.exit("ERROR: Missing python dateutil module. Run 'pip install python-dateutil'.")
 try:
-    from teslapy import Tesla, Retry, JsonDict, Battery, SolarPanel
+    from pypowerwall.cloud.teslapy import Tesla, Retry, JsonDict, Battery, SolarPanel
 except:
-    sys.exit("ERROR: Missing python teslapy module. Run 'pip install teslapy'.")
+    sys.exit("ERROR: Missing python pypowerwall module. Run 'pip install pypowerwall'.")
 try:
     from influxdb import InfluxDBClient
 except:
     sys.exit("ERROR: Missing python influxdb module. Run 'pip install influxdb'.")
 
-BUILD = "0.1.4"
+BUILD = "0.1.10"
 VERBOSE = True
-SCRIPTPATH = os.path.dirname(os.path.realpath(sys.argv[0]))
+SCRIPTPATH = Path(sys.argv[0]).resolve().parent
 SCRIPTNAME = os.path.basename(sys.argv[0]).split('.')[0]
 CONFIGNAME = CONFIGFILE = f"{SCRIPTNAME}.conf"
 AUTHFILE = f"{SCRIPTNAME}.auth"
@@ -80,6 +81,10 @@ parser = argparse.ArgumentParser(description='Import Powerwall or Solar history 
 parser.add_argument('-l', '--login', action="store_true", help='login to Tesla account only and save auth token (do not get history)')
 parser.add_argument('-t', '--test', action="store_true", help='enable test mode (do not import into InfluxDB)')
 parser.add_argument('-d', '--debug', action="store_true", help='enable debug output (print raw responses from Tesla cloud)')
+parser.add_argument('--dry-run', action="store_true", help='identify data gaps and show number of API calls required without making any API calls')
+group = parser.add_argument_group('login options')
+group.add_argument('--region', default="us", choices=["us", "cn"], help='specify Tesla account region (default: us)')
+group.add_argument('--headless', action="store_true", help='headless mode (show auth token prompt instead of opening browser)')
 group = parser.add_argument_group('advanced options')
 group.add_argument('--config', help=f'specify an alternate config file (default: {CONFIGNAME})')
 group.add_argument('--site', type=int, help='site id (required for Tesla accounts with multiple energy sites)')
@@ -98,7 +103,7 @@ group.add_argument('--yesterday', action="store_true", help='set start/end range
 args = parser.parse_args()
 
 if args.version:
-    print(f"{BUILD}")
+    print(BUILD)
     sys.exit()
 
 def sys_exit(error=None, halt=True):
@@ -168,6 +173,8 @@ else:
         parser.error("both arguments --start and --end are required")
     if not (args.login or args.setup) and not ((args.start and args.end) or (args.today or args.yesterday)):
         parser.error("missing arguments: --start/end or --today/yesterday")
+    if args.dry_run and (args.login or args.setup or args.remove or args.daemon):
+        parser.error("--dry-run cannot be used with --login, --setup, --remove, or --daemon")
     if args.reserve is not None and (args.reserve < 0 or args.reserve > 100):
         parser.error(f"argument --reserve: invalid value: '{args.reserve}'")
 
@@ -180,9 +187,9 @@ CONFIGNAME = CONFIGFILE = os.getenv('TESLA_CONF', CONFIGNAME)
 
 # Load Configuration File
 config = configparser.ConfigParser(allow_no_value=True)
-if not os.path.exists(CONFIGFILE) and "/" not in CONFIGFILE:
+if not os.path.exists(CONFIGFILE) and not Path(CONFIGFILE).is_absolute():
     # Look for config file in script location if not found
-    CONFIGFILE = f"{SCRIPTPATH}/{CONFIGFILE}"
+    CONFIGFILE = str(SCRIPTPATH / CONFIGFILE)
 if args.setup and os.path.exists(CONFIGFILE):
     # Prompt user to overwrite config when running setup
     print(f"\nExisting config found '{CONFIGNAME}'\n")
@@ -205,8 +212,8 @@ if os.path.exists(CONFIGFILE):
         TAUTH = os.getenv('TESLA_AUTH', config.get('Tesla', 'AUTH'))
         TDELAY = config.getint('Tesla', 'DELAY', fallback=1)
 
-        if "/" not in TAUTH:
-            TAUTH = f"{SCRIPTPATH}/{TAUTH}"
+        if not Path(TAUTH).is_absolute():
+            TAUTH = str(SCRIPTPATH / TAUTH)
 
         # Get InfluxDB Settings
         IHOST = os.getenv('INFLUX_HOST', config.get('InfluxDB', 'HOST'))
@@ -339,6 +346,12 @@ else:
         IPASS = ""
         IDB = "powerwall"
 
+    # Resolve relative auth path to script directory so first-run and
+    # subsequent runs write/read the cache from the same location regardless
+    # of what directory the script is launched from.
+    if not Path(TAUTH).is_absolute():
+        TAUTH = str(SCRIPTPATH / TAUTH)
+
     # Set other config defaults
     TDELAY = 1
     WAIT = 5
@@ -395,6 +408,7 @@ else:
 
 # Global Variables
 powerdata = []
+backupdata = []
 eventdata = []
 reservedata = []
 powergaps = None
@@ -405,7 +419,6 @@ tzname = None
 tzoffset = False
 power = None
 soe = None
-backup = None
 dayloaded = None
 eventsloaded = False
 reserveloaded = False
@@ -531,27 +544,26 @@ def tesla_login(email):
         if args.daemon:
             sys_exit("ERROR: Tesla auth token invalid or missing. Run interactively with --login option to create")
 
-        # Login to Tesla account and cache token
-        state = tesla.new_state()
-        code_verifier = tesla.new_code_verifier()
-
         try:
-            print("Open the below address in your browser to login.\n")
-            print(tesla.authorization_url(state=state, code_verifier=code_verifier))
-        except Exception as err:
-            sys_exit(f"ERROR: Connection failure - {repr(err)}")
+            from pypowerwall.tesla_auth import login
+        except:
+            sys_exit("ERROR: Outdated python pypowerwall module. Run 'pip install -U pypowerwall' to update.")
 
-        print("\nAfter login, paste the URL of the 'Page Not Found' webpage below.\n")
+        # Login to Tesla account and cache token
+        try:
+            # Get token via native browser (macOS/Linux/Windows) or headless (Linux/Windows/SSH)
+            refresh_token, detected_email, token_data = login(headless=args.headless, region=args.region)
+            tesla.refresh_token(refresh_token=refresh_token)
+            print()
+            print("-" * 40)
+        except Exception as err:
+            sys_exit(f"\nERROR: Tesla login failed - {repr(err)}")
 
         tesla.close()
-        tesla = Tesla(email, retry=retry, state=state, code_verifier=code_verifier, cache_file=TAUTH)
+        tesla = Tesla(email, retry=retry, cache_file=TAUTH)
 
         if not tesla.authorized:
-            try:
-                tesla.fetch_token(authorization_response=input("Enter URL after login: "))
-                print("-" * 40)
-            except Exception as err:
-                sys_exit(f"ERROR: Login failure - {repr(err)}")
+            sys_exit("ERROR: Tesla auth token invalid or missing. Run interactively with --login option to create")
     else:
         # Enable retries
         tesla.close()
@@ -834,35 +846,48 @@ def get_backup_history(start, end):
 
     Adds data points to 'eventdata' in InfluxDB Line Protocol format with tag source='cloud'
     """
-    global fetcherr, eventsloaded, backup
+    global fetcherr, eventsloaded
 
     if not eventsloaded:
-        if VERBOSE:
-            print("Retrieving backup event history")
-        time.sleep(TDELAY)
-        try:
-            # Retrieve full backup event history
-            backup = site.get_history_data(kind='backup')
-            if args.debug:
-                print(backup)
-            """ Example 'events' response (event duration in ms):
-            {
-                "timestamp": "2022-04-19T20:55:53+10:00",
-                "duration": 3862580
-            }
-            """
-            if args.daemon and fetcherr:
-                fetcherr = False
-                sys.stdout.flush()
-                sys.stderr.write(" + Retrieve history data succeeded\n")
-                sys.stderr.flush()
-        except Exception as err:
-            sys_exit(f"ERROR: Failed to retrieve history data - {repr(err)}", halt=False)
-            if args.daemon:
-                fetcherr = True
-                sys.stderr.write(f" ! Retrieve history data failed, retrying in {RETRY} seconds\n")
-                sys.stderr.flush()
-            return
+        startdate = start
+        enddate = datetime.now(tz=influxtz).replace(hour=23, minute=59, second=59, microsecond=0)
+        printed = False
+
+        while enddate > startdate:
+            if VERBOSE and not printed:
+                print("Retrieving backup event history")
+                printed = True
+
+            time.sleep(TDELAY)
+            try:
+                # Retrieve full backup event history
+                backup = site.get_calendar_history_data(kind='backup', period='lifetime', end_date=enddate.isoformat())
+                if args.debug:
+                    print(backup)
+                """ Example 'events' response (event duration in ms):
+                {
+                    "timestamp": "2022-04-19T20:55:53+10:00",
+                    "duration": 3862580
+                }
+                """
+                if args.daemon and fetcherr:
+                    fetcherr = False
+                    sys.stdout.flush()
+                    sys.stderr.write(" + Retrieve history data succeeded\n")
+                    sys.stderr.flush()
+            except Exception as err:
+                sys_exit(f"ERROR: Failed to retrieve history data - {repr(err)}", halt=False)
+                if args.daemon:
+                    fetcherr = True
+                    sys.stderr.write(f" ! Retrieve history data failed, retrying in {RETRY} seconds\n")
+                    sys.stderr.flush()
+                return
+
+            if backup:
+                backupdata.append(backup)
+                enddate = isoparse(backup['next_end_date']) if 'next_end_date' in backup else startdate
+            else:
+                break
 
         eventsloaded = True
 
@@ -879,7 +904,7 @@ def get_backup_history(start, end):
         gridstatus.append(gridpoint)
         timestamp += timedelta(minutes=1)
 
-    if backup:
+    for backup in backupdata:
         for d in backup['events']:
             # Determine backup event start/end time
             eventstart = isoparse(d['timestamp']).astimezone(utctz)
@@ -1367,6 +1392,83 @@ if args.remove and not (args.login or args.setup):
     print("\nDone.")
     sys_exit()
 
+if args.dry_run:
+    # Dry-run mode: identify data gaps and count required API calls without making any Tesla Cloud requests
+    start, end = get_start_end()
+    print(f"Running for period: [{start.astimezone(influxtz)}] - [{end.astimezone(influxtz)}] ({str(end - start)}s)\n")
+
+    if args.force:
+        # When --force is used, treat the entire range as a single gap (skip gap search)
+        powergaps = [{'start': start, 'end': end}]
+        gridgaps = [{'start': start, 'end': end}]
+        reservegaps = [{'start': start, 'end': end}] if args.reserve is not None else None
+        print("Forced range — treating entire period as one gap.\n")
+    else:
+        # Search InfluxDB for power usage data gaps
+        powergaps = search_influx(start, end, 'power usage')
+        print() if powergaps else print("* None found\n")
+
+        gridgaps = None
+        reservegaps = None
+
+        # Note: We cannot determine if the site is a Battery without Tesla API access.
+        # We search for grid status gaps (local query only) and include them in the count.
+        gridgaps = search_influx(start, end, 'grid status')
+        print() if gridgaps else print("* None found\n")
+
+        if args.reserve is not None:
+            reservegaps = search_influx(start, end, 'backup reserve percent')
+            print() if reservegaps else print("* None found\n")
+
+    if not (powergaps or gridgaps or reservegaps):
+        print("Done.")
+        sys_exit()
+
+    # Count the number of Tesla Cloud API calls that would be required
+    # Power history: one 'power' call per day per gap + one 'soe' call per day per gap (for Battery sites)
+    power_calls = 0
+    soe_calls = 0
+    if powergaps:
+        for period in powergaps:
+            gap_start = period['start']
+            gap_end = period['end']
+            # Count days (aligned to site timezone, but we use influxtz as fallback)
+            day = gap_start.astimezone(influxtz).replace(hour=0, minute=0, second=0, tzinfo=None)
+            endday = gap_end.astimezone(influxtz).replace(hour=0, minute=0, second=0, tzinfo=None)
+            days = 0
+            d = day
+            while d <= endday:
+                days += 1
+                d += timedelta(days=1)
+            power_calls += days  # one 'power' API call per day
+            soe_calls += days    # one 'soe' API call per day (for Battery sites)
+
+    # Backup history: at least one call to retrieve lifetime backup events
+    # (exact count depends on number of event pages, which requires an API call to determine)
+    backup_calls = 0
+    if gridgaps:
+        backup_calls = 1  # At least one call; more may be needed for pagination
+
+    # Reserve history: no API calls (data is generated locally from --reserve value)
+    total_calls = power_calls + soe_calls + backup_calls
+
+    print("-" * 51)
+    print("Dry Run Summary - Estimated Tesla Cloud API calls:")
+    print("-" * 51)
+    if powergaps:
+        print(f"  Power history calls:  {power_calls} (one per day per gap)")
+        print(f"  SOE history calls:    {soe_calls} (one per day per gap, Battery sites only)")
+    if gridgaps:
+        print(f"  Backup history calls: {backup_calls}+ (lifetime events, may paginate)")
+    if reservegaps:
+        print(f"  Reserve history:      0 (generated locally, no API calls)")
+    print(f"  {'-' * 45}")
+    print(f"  Total estimated calls: {total_calls}+")
+    print("\nNote: SOE and backup calls only apply to Powerwall (Battery) sites.")
+    print("      Backup call count is a minimum; actual calls depend on event history length.")
+    print("\nDone.")
+    sys_exit()
+
 # Login and get list of Tesla Energy sites
 sitelist = tesla_login(TUSER)
 
@@ -1478,6 +1580,7 @@ elif args.daemon:
 
             # Re-initialise globals
             powerdata.clear()
+            backupdata.clear()
             eventdata.clear()
             reservedata.clear()
             dayloaded = None
